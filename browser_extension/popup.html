@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Screen Text Reader</title>
+  <style>
+    body { font-family: Arial, sans-serif; width: 360px; padding: 10px; }
+    textarea { width: 100%; height: 200px; }
+    button { margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h3>Last captured text</h3>
+  <div id="meta"></div>
+  <textarea id="text" readonly></textarea>
+  <div>
+    <button id="refresh">Refresh</button>
+    <button id="copy">Copy</button>
+  </div>
+  <hr />
+  <div>
+    <label for="endpoint">Analysis endpoint:</label>
+    <input id="endpoint" type="text" style="width:100%" placeholder="http://127.0.0.1:8000/analyze" />
+    <button id="save-endpoint">Save</button>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

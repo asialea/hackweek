@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Screen Text Reader",
+  "version": "0.1.0",
+  "description": "Read visible text on specific sites and surface it to a popup.",
+  "permissions": ["storage", "scripting", "activeTab", "identity"],
+  "host_permissions": [
+    "*://*.reddit.com/*",
+    "*://*.chatgpt.com/*",
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*"
+  ],
+  "action": {
+  "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.chatgpt.com/*", "*://*.reddit.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
