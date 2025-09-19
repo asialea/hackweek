@@ -8,7 +8,7 @@ Files created
 - `manifest.json` — extension manifest (MV3)
 - `content.js` — content script to extract visible text
 - `background.js` — background service worker to receive messages
-- `popup.html`, `popup.js` — UI to view copied text
+- `popup.html`, `popup.js` — UI for login pro,pt
 
 Load locally
 1. Open chrome://extensions
