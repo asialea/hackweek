@@ -1,109 +1,60 @@
-Project API README
+# prompt_analyzer — Project API (POC)
 
-This project exposes a small FastAPI service to analyze chat-like messages, persist per-message analyses, aggregate daily metrics, and optionally generate human-friendly summaries via an LLM.
+This is a small FastAPI proof-of-concept service that analyzes chat-like messages, stores per-message analyses, aggregates daily metrics, and can email human-friendly summaries.
 
-Run the server
+Run the server (development)
 
 ```bash
 cd prompt_analyzer
 uvicorn main:app --reload
 ```
 
-Common notes
+Notes
 - Default host: http://127.0.0.1:8000
 - Database: `themes.db` in the project root (auto-created)
-- LLM: To enable upleveling, set `GROQ_API_KEY` or `OPENAI_API_KEY` in environment and optionally `GROQ_MODEL`.
+- This repository currently runs as a POC: `/analyze` accepts `user_id` from the request body and does not require a JWT. This is insecure and intended for testing only.
 
-Endpoints
+Environment variables
+- `SENDGRID_API_KEY`, `SENDGRID_FROM`, (optional) `SENDGRID_TO` — required for `POST /email_summary/{user_id}` to send emails.
+- `DEFAULT_USER_ID` — fallback user id when none provided (defaults to `default_user`).
+- `STORE_FULL_TEXT` — set to `1`, `true`, or `yes` to persist full message text (defaults to false).
+
+Endpoints (current)
 
 1) POST /analyze
-- Purpose: Analyze one or more messages, return sentiment, themes, per-message analysis, and optionally persist themes and analyses when `user_id` provided.
+- Purpose: Analyze one or more messages, return sentiment, themes, and optionally persist themes and analyses when `user_id` provided in the body.
 - Payload:
   {
     "messages": [{"sender": "user","text": "..."}, ...],
-    "user_id": "alice"  # optional
+    "user_id": "alice"  # optional for POC
   }
 - Sample curl:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/analyze \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"sender":"user","text":"I feel sad today"},{"sender":"assistant","text":"I am here to help"}],"user_id":"alice"}'
+  -d '{"messages":[{"sender":"user","text":"I feel sad today"}],"user_id":"alice"}'
 ```
 
-2) GET /aggregate/{user_id}/{date}
-- Purpose: Aggregate analyses for a given user and date (YYYY-MM-DD). Persists a `daily_summaries` row.
-- Sample curl:
+2) GET /analyses/{user_id}
+- Return raw analysis rows for a user (optionally filtered by date query param `?date=YYYY-MM-DD`).
+
+3) GET /mental_health/{user_id}
+- Aggregate analyses for the user and ask the optional LLM helper to generate a human-friendly assessment. Requires LLM API key to uplevel.
+
+4) POST /email_summary/{user_id}
+- Compose an HTML + plaintext summary for the user's aggregated metrics and send via SendGrid. Body params: `recipient` (email) and optional `date` (YYYY-MM-DD). Requires SendGrid env vars.
+- Sample curl (send today's summary to the same email):
 
 ```bash
-curl http://127.0.0.1:8000/aggregate/alice/2025-09-18
+curl -i -X POST "http://127.0.0.1:8000/email_summary/test%40gmail.com" \
+  -H "Content-Type: application/json" \
+  -d '{"recipient":"sample@gmail.com","date":"2025-09-19"}'
 ```
 
-3) POST /aggregate_all
-- Purpose: Aggregate for all users for a given date (in the JSON body as `date`), defaulting to today (UTC) if omitted.
-- Body example: `{ "date": "2025-09-18" }` or `{}` for today.
-- Sample curl:
+5) Other utilities
+- There are helper modules for themes storage and LLM upleveling. See code in `app/` for additional endpoints and internal helpers.
 
-```bash
-curl -X POST http://127.0.0.1:8000/aggregate_all -H "Content-Type: application/json" -d '{}'
-```
-
-4) POST /uplevel/{user_id}/{date}
-- Purpose: Ask the configured LLM to generate a short human-friendly summary for the date's aggregated metrics. Requires LLM API key.
-- Body: `{ "include_excerpts": true }` (optional)
-- Sample curl:
-
-```bash
-curl -X POST http://127.0.0.1:8000/uplevel/alice/2025-09-18 -H "Content-Type: application/json" -d '{"include_excerpts":true}'
-```
-
-5) GET /themes/{user_id}
-- Purpose: Return stored theme rows for a user.
-- Sample curl:
-
-```bash
-curl http://127.0.0.1:8000/themes/alice
-```
-
-6) GET /themes/{user_id}/since?since=YYYY-MM-DDTHH:MM:SS&summarize=true
-- Purpose: Filter theme history since an ISO date and optionally summarize counts.
-- Sample curl:
-
-```bash
-curl "http://127.0.0.1:8000/themes/alice/since?since=2025-09-01T00:00:00&summarize=true"
-```
-
-7) POST /transform
-- Purpose: Pseudonymize a prompt before sending to external services.
-- Body: `{ "prompt": "My secret is ..." }`
-- Sample:
-
-```bash
-curl -X POST http://127.0.0.1:8000/transform -H "Content-Type: application/json" -d '{"prompt":"My password is 1234"}'
-```
-
-8) POST /log
-- Purpose: Simple logging placeholder. Body: `{ "message": "...", "risk_tag": "self_harm" }`
-
-```bash
-curl -X POST http://127.0.0.1:8000/log -H "Content-Type: application/json" -d '{"message":"sample","risk_tag":"none"}'
-```
-
-9) GET /summary/{user_id}
-- Purpose: Placeholder for parent-friendly summary. Sample:
-
-```bash
-curl http://127.0.0.1:8000/summary/alice
-```
-
-10) GET /status
-- Purpose: health check
-
-```bash
-curl http://127.0.0.1:8000/status
-```
-
-Notes & next steps
-- For production, restrict CORS and add authentication to the aggregation endpoints.
-- To automate daily aggregation, call `/aggregate_all` from a cron job or scheduler.
-- If you want, I can add a small `tasks/daily_aggregate.py` and a sample cron entry.
+Security & next steps
+- This POC accepts `user_id` from the request body and should not be used as-is in production — a malicious client could spoof user IDs.
+- For production: reintroduce JWT-based auth, exchange provider codes on the backend for local JWTs, and validate tokens on every request.

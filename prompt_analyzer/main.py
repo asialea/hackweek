@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import Body, HTTPException, Query
+from fastapi import Body, HTTPException, Query, Depends
 from typing import List, Dict, Any
 import re
 import os
@@ -55,6 +55,7 @@ from app.storage import save_user_themes, get_user_themes, save_analysis, get_an
 from app.storage import get_user_ids_for_date
 from app.storage import get_analyses_for_user
 from sendgrid import SendGridAPIClient
+from app.auth import get_current_user
 from sendgrid.helpers.mail import Mail
 
 app = FastAPI()
@@ -93,7 +94,7 @@ def analyze(messages: List[Dict[str, Any]] = Body(...), user_id: str = Body(None
         "sentiment": result["sentiment"],
         "themes": extract_themes(all_text),
     }
-    # Use default user id if none provided
+    # Resolve user id in this order for POC: body.user_id > DEFAULT_USER_ID
     DEFAULT_USER_ID = os.environ.get("DEFAULT_USER_ID", "default_user")
     used_user_id = user_id or DEFAULT_USER_ID
 

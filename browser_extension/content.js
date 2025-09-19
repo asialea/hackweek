@@ -86,18 +86,21 @@
     if (!text) return;
     const endpoint = cachedEndpoint || 'http://127.0.0.1:8000/analyze';
     try {
-      fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: [{ sender: 'page', text }], source: location.href }),
-        keepalive: true
-      }).then((resp) => {
-        if (!resp.ok) backoffMult = Math.min(MAX_BACKOFF_MULT, backoffMult * 2);
-        else backoffMult = 1;
-      }).catch(() => {
-        backoffMult = Math.min(MAX_BACKOFF_MULT, backoffMult * 2);
-      }).finally(() => {
-        scheduleHeartbeat();
+      // Try to get user email + token from background (non-interactive). If found, include as user_id.
+      chrome.runtime.sendMessage({ type: 'GET_USER_EMAIL', interactive: false }, async (resp) => {
+        const headers = { 'Content-Type': 'application/json' };
+        let body = { messages: [{ sender: 'page', text }], source: location.href };
+        if (resp && resp.token) headers['Authorization'] = 'Bearer ' + resp.token;
+        if (resp && resp.email) body.user_id = resp.email;
+        try {
+          const r = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body), keepalive: true });
+          if (!r.ok) backoffMult = Math.min(MAX_BACKOFF_MULT, backoffMult * 2);
+          else backoffMult = 1;
+        } catch (err) {
+          backoffMult = Math.min(MAX_BACKOFF_MULT, backoffMult * 2);
+        } finally {
+          scheduleHeartbeat();
+        }
       });
     } catch (e) {
       backoffMult = Math.min(MAX_BACKOFF_MULT, backoffMult * 2);
@@ -254,26 +257,32 @@
     if (!text) return;
     const endpoint = cachedEndpoint || 'http://127.0.0.1:8000/analyze';
     try {
-      fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: [{ sender: 'page', text }], source: location.href }),
-        keepalive: true
-      }).then(resp => {
-        if (!resp.ok) {
-          console.warn('analyze endpoint returned', resp.status);
-          backoffMult = Math.min(MAX_BACKOFF_MULT, backoffMult * 2);
-        } else {
-          backoffMult = 1;
+      // Ask background for user email + token non-interactively
+      chrome.runtime.sendMessage({ type: 'GET_USER_EMAIL', interactive: false }, async (resp) => {
+        if (chrome.runtime && chrome.runtime.lastError) {
+          console.debug('GET_USER_EMAIL runtime error:', chrome.runtime.lastError.message || String(chrome.runtime.lastError));
         }
-      }).catch(err => {
-        console.warn('analyze POST failed', err);
-        backoffMult = Math.min(MAX_BACKOFF_MULT, backoffMult * 2);
-      }).finally(() => {
-        scheduleHeartbeat();
+        const headers = { 'Content-Type': 'application/json' };
+        let body = { messages: [{ sender: 'page', text }], source: location.href };
+        if (resp && resp.token) headers['Authorization'] = 'Bearer ' + resp.token;
+        if (resp && resp.email) body.user_id = resp.email;
+        try {
+          const r = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body), keepalive: true });
+          if (!r.ok) {
+            console.warn('analyze endpoint returned', r.status);
+            backoffMult = Math.min(MAX_BACKOFF_MULT, backoffMult * 2);
+          } else {
+            backoffMult = 1;
+          }
+        } catch (err) {
+          console.warn('analyze POST failed', err && (err.message || String(err)));
+          backoffMult = Math.min(MAX_BACKOFF_MULT, backoffMult * 2);
+        } finally {
+          scheduleHeartbeat();
+        }
       });
     } catch (e) {
-      console.warn('postCapture error', e);
+      console.warn('postCapture error', e && (e.message || String(e)));
       backoffMult = Math.min(MAX_BACKOFF_MULT, backoffMult * 2);
       scheduleHeartbeat();
     }

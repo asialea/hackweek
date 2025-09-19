@@ -1,34 +1,45 @@
-// popup.js - read lastCapturedText from storage and display
+// Minimal popup script: check login status and offer Login/Logout
 document.addEventListener('DOMContentLoaded', () => {
-  const textEl = document.getElementById('text');
-  const metaEl = document.getElementById('meta');
-  const refresh = document.getElementById('refresh');
-  const copy = document.getElementById('copy');
+  const status = document.getElementById('status');
+  function setStatus(s) { if (status) status.textContent = s; }
 
-  function load() {
-    chrome.storage.local.get(['lastCapturedText', 'capturedAt'], (res) => {
-      textEl.value = res.lastCapturedText || '';
-      metaEl.textContent = res.capturedAt ? 'Captured: ' + res.capturedAt : '';
+  // On open, check non-interactively whether we have a stored token/session.
+  chrome.runtime.sendMessage({ type: 'GET_ACCESS_TOKEN', interactive: false }, (resp) => {
+    if (chrome.runtime && chrome.runtime.lastError) {
+      setStatus('Error checking login');
+      return;
+    }
+    if (resp && resp.token) {
+      setStatus('Logged in');
+    } else {
+      // Not logged in: because the popup open is a user gesture, start interactive auth
+      setStatus('Not logged in — opening sign-in...');
+      chrome.runtime.sendMessage({ type: 'GET_ACCESS_TOKEN', interactive: true }, (resp2) => {
+        if (chrome.runtime && chrome.runtime.lastError) {
+          setStatus('Login failed');
+          return;
+        }
+        if (resp2 && resp2.token) setStatus('Logged in');
+        else setStatus('Login required');
+      });
+    }
+  });
+
+  const loginBtn = document.getElementById('login');
+  const logoutBtn = document.getElementById('logout');
+
+  if (loginBtn) loginBtn.addEventListener('click', () => {
+    setStatus('Opening login...');
+    // START_LOGIN will run an interactive auth flow in background.js
+    chrome.runtime.sendMessage({ type: 'START_LOGIN' }, (resp) => {
+      if (resp && resp.ok) setStatus('Logged in');
+      else setStatus('Login cancelled or failed');
     });
-  }
-
-  refresh.addEventListener('click', load);
-  copy.addEventListener('click', () => {
-    textEl.select();
-    document.execCommand('copy');
   });
 
-  load();
-  // load and save analysis endpoint
-  const endpointInput = document.getElementById('endpoint');
-  const saveBtn = document.getElementById('save-endpoint');
-  chrome.storage.local.get(['analyzeEndpoint'], (res) => {
-    endpointInput.value = res.analyzeEndpoint || '';
-  });
-  saveBtn.addEventListener('click', () => {
-    const val = endpointInput.value.trim();
-    chrome.storage.local.set({ analyzeEndpoint: val }, () => {
-      alert('Endpoint saved');
+  if (logoutBtn) logoutBtn.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'LOGOUT' }, (resp) => {
+      setStatus('Logged out');
     });
   });
 });
