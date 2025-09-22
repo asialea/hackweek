@@ -3,3 +3,5 @@ uvicorn
 vaderSentiment
 openai
 spacy
+requests
+PyJWT

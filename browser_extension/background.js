@@ -7,7 +7,9 @@ const AUTH_CONFIG = {
   authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
   scope: 'openid profile email',
   redirectUri: 'https://gdhpboaofomkjkgabhobogcnebgbfoha.chromiumapp.org/',
-  responseType: 'token', // or "id_token token" if you want both
+  responseType: 'code', // use code so we exchange on the backend and receive a local JWT
+  // Default backend exchange URL; update in extension storage if your backend runs elsewhere.
+  tokenExchangeUrl: 'http://127.0.0.1:8000/auth/exchange',
 };
 
 function randomString(len = 43) {
@@ -74,19 +76,22 @@ async function startAuthFlow() {
         const code = u.searchParams.get('code');
         if (code) {
           const codeVerifier = stored._code_verifier;
-          if (!AUTH_CONFIG.tokenExchangeUrl) return reject(new Error('No tokenExchangeUrl set for code exchange'));
+          const exchangeUrl = AUTH_CONFIG.tokenExchangeUrl || (stored && stored.analyzeEndpoint && stored.analyzeEndpoint.replace(/\/$/, '') + '/auth/exchange');
+          if (!exchangeUrl) return reject(new Error('No tokenExchangeUrl set for code exchange'));
           try {
-            const resp = await fetch(AUTH_CONFIG.tokenExchangeUrl, {
+            const resp = await fetch(exchangeUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ code, code_verifier: codeVerifier, redirect_uri: redirectUri }),
             });
-            if (!resp.ok) throw new Error('Token exchange failed: ' + resp.status);
+            if (!resp.ok) throw new Error('Token exchange failed: ' + resp.status + ' ' + (await resp.text()));
             const data = await resp.json();
-            // Expect backend to return { access_token, expires_in }
+            // Expect backend to return { access_token, expires_in, user_email }
             const expiresAt = data.expires_in ? Date.now() + (data.expires_in * 1000) : null;
-            await chrome.storage.local.set({ access_token: data.access_token, access_token_expires_at: expiresAt });
-            resolve({ access_token: data.access_token, expires_at: expiresAt });
+            const toStore = { access_token: data.access_token, access_token_expires_at: expiresAt };
+            if (data.user_email) toStore.user_email = data.user_email;
+            await chrome.storage.local.set(toStore);
+            resolve({ access_token: data.access_token, expires_at: expiresAt, user_email: data.user_email });
             return;
           } catch (err) {
             return reject(err);
@@ -144,19 +149,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
       try {
-        // Use OpenID Connect userinfo endpoint to obtain email
-        const resp = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
-          headers: { 'Authorization': 'Bearer ' + token }
-        });
-        if (!resp.ok) {
-          sendResponse({ error: 'userinfo_failed', status: resp.status });
+        // If we already have a cached user_email from the backend exchange, return it.
+        const stored = await chrome.storage.local.get(['user_email']);
+        if (stored && stored.user_email) {
+          sendResponse({ email: stored.user_email, token });
           return;
         }
-        const profile = await resp.json();
-        const email = profile && (profile.email || profile.preferred_username || profile.sub);
-        // cache minimal info
-        await chrome.storage.local.set({ user_email: email });
-        sendResponse({ email, token, profile });
+        // Fallback: try provider userinfo with the token (works if token is provider access_token)
+        try {
+          const resp = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+            headers: { 'Authorization': 'Bearer ' + token }
+          });
+          if (resp.ok) {
+            const profile = await resp.json();
+            const email = profile && (profile.email || profile.preferred_username || profile.sub);
+            if (email) await chrome.storage.local.set({ user_email: email });
+            sendResponse({ email, token, profile });
+            return;
+          }
+        } catch (e) {
+          // ignore provider userinfo failures for local-JWTs
+        }
+        // If we reached here, we have a token but couldn't determine email
+        sendResponse({ token });
       } catch (err) {
         sendResponse({ error: (err && (err.message || String(err))) });
       }

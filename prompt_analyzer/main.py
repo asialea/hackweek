@@ -57,6 +57,10 @@ from app.storage import get_analyses_for_user
 from sendgrid import SendGridAPIClient
 from app.auth import get_current_user
 from sendgrid.helpers.mail import Mail
+import requests
+import jwt
+from jwt import PyJWKClient
+from app.auth import create_jwt
 
 app = FastAPI()
 
@@ -76,7 +80,7 @@ def read_root():
 
 
 @app.post("/analyze")
-def analyze(messages: List[Dict[str, Any]] = Body(...), user_id: str = Body(None)):
+def analyze(messages: List[Dict[str, Any]] = Body(...), current_user: Dict[str, Any] = Depends(get_current_user)):
     """
     Expected payload: a JSON array of messages like:
     [{"sender": "child", "text": "I want to..."}, ...]
@@ -94,9 +98,13 @@ def analyze(messages: List[Dict[str, Any]] = Body(...), user_id: str = Body(None
         "sentiment": result["sentiment"],
         "themes": extract_themes(all_text),
     }
-    # Resolve user id in this order for POC: body.user_id > DEFAULT_USER_ID
-    DEFAULT_USER_ID = os.environ.get("DEFAULT_USER_ID", "default_user")
-    used_user_id = user_id or DEFAULT_USER_ID
+    # Derive user id from the verified local JWT (subject from token)
+    used_user_id = None
+    if current_user and isinstance(current_user, dict):
+        used_user_id = current_user.get('user_id')
+    if not used_user_id:
+        # Strict enforcement: reject unauthenticated requests
+        raise HTTPException(status_code=401, detail='Authentication required')
 
     # Persist themes if user_id provided (use the resolved used_user_id)
     if used_user_id:
@@ -130,9 +138,128 @@ def analyze(messages: List[Dict[str, Any]] = Body(...), user_id: str = Body(None
 
     # include which user id was used to persist
     response["used_user_id"] = used_user_id
-    print(response)
+
+    # If this analysis detects high danger, attempt to notify the user's email address (POC behavior)
+    try:
+        if str(result.get('danger_level')).lower() == 'high':
+            # basic email address heuristic
+            if isinstance(used_user_id, str) and '@' in used_user_id and '.' in used_user_id.split('@')[-1]:
+                sendgrid_key = os.environ.get('SENDGRID_API_KEY')
+                send_from = os.environ.get('SENDGRID_FROM')
+                if sendgrid_key and send_from:
+                    try:
+                        # Compose a short alert email (plain + html)
+                        excerpt = (all_text or '')[:400]
+                        subj = f"Alert: high-risk content detected"
+                        plain = (
+                            f"We detected high-risk content in recent analyzed messages.\n\n"
+                            f"Risk tags: {', '.join(response.get('risk_tags', []))}\n"
+                            f"Detected at: {response.get('analysis_ts', datetime.utcnow().isoformat())}\n\n"
+                            f"Excerpt:\n{excerpt}\n\n"
+                            "If this is an emergency, contact local emergency services immediately."
+                        )
+                        html = f"<p><strong>High-risk content detected</strong></p><p>Risk tags: {', '.join(response.get('risk_tags', []))}</p><p>Excerpt:<br><pre>{excerpt}</pre></p><p>If this is an emergency, contact local emergency services immediately.</p>"
+
+                        msg = Mail(
+                            from_email=send_from,
+                            to_emails=used_user_id,
+                            subject=subj,
+                            plain_text_content=plain,
+                            html_content=html,
+                        )
+                        sg = SendGridAPIClient(sendgrid_key)
+                        sg_resp = sg.send(msg)
+                        response['alert_email_sent'] = True
+                        response['alert_email_status'] = getattr(sg_resp, 'status_code', None)
+                    except Exception as e:
+                        response['alert_email_sent'] = False
+                        response['alert_email_error'] = str(e)
+                else:
+                    response['alert_email_sent'] = False
+                    response['alert_email_error'] = 'Missing SENDGRID_API_KEY or SENDGRID_FROM'
+            else:
+                response['alert_email_sent'] = False
+                response['alert_email_error'] = 'used_user_id is not an email'
+    except Exception as e:
+        # Don't let email failures break analyze
+        response['alert_email_sent'] = False
+        response['alert_email_error'] = str(e)
 
     return response
+
+
+@app.post('/auth/exchange')
+def auth_exchange(code: str = Body(...), code_verifier: str = Body(...), redirect_uri: str = Body(...)):
+    """Exchange an OAuth2 authorization code (PKCE) with the provider and return a local JWT.
+
+    Expects environment variables:
+      OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET
+    Optional:
+      OAUTH_PROVIDER_TOKEN_URL (default Google), OAUTH_USERINFO_URL (default Google)
+    """
+    token_url = os.environ.get('OAUTH_PROVIDER_TOKEN_URL', 'https://oauth2.googleapis.com/token')
+    userinfo_url = os.environ.get('OAUTH_USERINFO_URL', 'https://openidconnect.googleapis.com/v1/userinfo')
+    client_id = os.environ.get('OAUTH_CLIENT_ID')
+    client_secret = os.environ.get('OAUTH_CLIENT_SECRET')
+
+    if not client_id or not client_secret:
+        raise HTTPException(status_code=400, detail='OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET must be set on the server')
+
+    # Exchange code for provider tokens
+    try:
+        resp = requests.post(token_url, data={
+            'grant_type': 'authorization_code',
+            'code': code,
+            'redirect_uri': redirect_uri,
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'code_verifier': code_verifier,
+        }, headers={'Accept': 'application/json'}, timeout=15)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f'Provider token request failed: {e}')
+
+    if not resp.ok:
+        raise HTTPException(status_code=502, detail=f'Provider token exchange failed: {resp.status_code} {resp.text}')
+
+    token_data = resp.json()
+    id_token = token_data.get('id_token')
+    access_token = token_data.get('access_token')
+
+    user_email = None
+    subject = None
+
+    # Try verify id_token using provider JWKS (Google)
+    if id_token:
+        try:
+            jwks_uri = 'https://www.googleapis.com/oauth2/v3/certs'
+            jwk_client = PyJWKClient(jwks_uri)
+            signing_key = jwk_client.get_signing_key_from_jwt(id_token)
+            payload = jwt.decode(id_token, signing_key.key, algorithms=[signing_key.algorithm], audience=client_id)
+            subject = payload.get('sub')
+            user_email = payload.get('email')
+        except Exception:
+            # fallback to userinfo if id_token verification fails
+            subject = None
+
+    # If we don't have subject/email yet, call userinfo with access_token
+    if (not subject or not user_email) and access_token:
+        try:
+            ui = requests.get(userinfo_url, headers={'Authorization': f'Bearer {access_token}'}, timeout=8)
+            if ui.ok:
+                profile = ui.json()
+                subject = subject or profile.get('sub')
+                user_email = user_email or profile.get('email')
+        except Exception:
+            pass
+
+    # Final fallback: use whatever we have
+    if not subject and not user_email:
+        raise HTTPException(status_code=400, detail='Unable to determine user identity from provider tokens')
+
+    subject_for_jwt = user_email or subject
+    local_jwt = create_jwt(subject_for_jwt, expires_minutes=60 * 24)
+
+    return {'access_token': local_jwt, 'expires_in': 60 * 60 * 24, 'user_email': user_email}
 
 
 @app.get("/analyses/{user_id}")

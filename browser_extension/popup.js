@@ -10,7 +10,11 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     if (resp && resp.token) {
-      setStatus('Logged in');
+      // If background stored a user_email, GET_USER_EMAIL may return it; prefer displaying email
+      chrome.runtime.sendMessage({ type: 'GET_USER_EMAIL', interactive: false }, (u) => {
+        if (u && u.email) setStatus('Logged in as ' + u.email);
+        else setStatus('Logged in');
+      });
     } else {
       // Not logged in: because the popup open is a user gesture, start interactive auth
       setStatus('Not logged in — opening sign-in...');
@@ -19,8 +23,12 @@ document.addEventListener('DOMContentLoaded', () => {
           setStatus('Login failed');
           return;
         }
-        if (resp2 && resp2.token) setStatus('Logged in');
-        else setStatus('Login required');
+        if (resp2 && resp2.token) {
+          chrome.runtime.sendMessage({ type: 'GET_USER_EMAIL', interactive: false }, (u) => {
+            if (u && u.email) setStatus('Logged in as ' + u.email);
+            else setStatus('Logged in');
+          });
+        } else setStatus('Login required');
       });
     }
   });
