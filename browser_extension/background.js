@@ -38,7 +38,7 @@ async function startAuthFlow() {
   const codeVerifier = randomString(64);
   const codeChallenge = await sha256Base64Url(codeVerifier);
 
-  const authUrl = `${AUTH_CONFIG.authUrl}?response_type=code%20token&client_id=${encodeURIComponent(AUTH_CONFIG.clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(AUTH_CONFIG.scope)}&state=${encodeURIComponent(state)}&code_challenge=${encodeURIComponent(codeChallenge)}&code_challenge_method=S256`;
+  const authUrl = `${AUTH_CONFIG.authUrl}?response_type=code&client_id=${encodeURIComponent(AUTH_CONFIG.clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(AUTH_CONFIG.scope)}&state=${encodeURIComponent(state)}&code_challenge=${encodeURIComponent(codeChallenge)}&code_challenge_method=S256`;
 
   await chrome.storage.local.set({ _auth_state: state, _code_verifier: codeVerifier });
 
@@ -76,13 +76,19 @@ async function startAuthFlow() {
         const code = u.searchParams.get('code');
         if (code) {
           const codeVerifier = stored._code_verifier;
+          console.log('DEBUG: About to exchange code, codeVerifier exists:', !!codeVerifier); // DEBUG
+          console.log('DEBUG: stored object keys:', Object.keys(stored || {})); // DEBUG
           const exchangeUrl = AUTH_CONFIG.tokenExchangeUrl || (stored && stored.analyzeEndpoint && stored.analyzeEndpoint.replace(/\/$/, '') + '/auth/exchange');
           if (!exchangeUrl) return reject(new Error('No tokenExchangeUrl set for code exchange'));
+          
+          const requestBody = { code, code_verifier: codeVerifier, redirect_uri: redirectUri };
+          console.log('DEBUG: Request body being sent:', requestBody); // DEBUG
+          
           try {
             const resp = await fetch(exchangeUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ code, code_verifier: codeVerifier, redirect_uri: redirectUri }),
+              body: JSON.stringify(requestBody),
             });
             if (!resp.ok) throw new Error('Token exchange failed: ' + resp.status + ' ' + (await resp.text()));
             const data = await resp.json();
@@ -109,13 +115,22 @@ async function startAuthFlow() {
 async function getToken({ interactive = false } = {}) {
   const stored = await chrome.storage.local.get(['access_token','access_token_expires_at']);
   const now = Date.now();
+  console.log('DEBUG getToken: stored keys:', Object.keys(stored));
+  console.log('DEBUG getToken: token exists?', !!stored.access_token);
+  console.log('DEBUG getToken: expires_at:', stored.access_token_expires_at);
+  console.log('DEBUG getToken: current time:', now);
+  console.log('DEBUG getToken: time check:', stored.access_token_expires_at > now + 30000);
+  
   if (stored.access_token && stored.access_token_expires_at && stored.access_token_expires_at > now + 30000) {
+    console.log('DEBUG getToken: returning stored token');
     return stored.access_token;
   }
   // If token missing or expired: only start interactive auth when explicitly requested
   if (!interactive) {
+    console.log('DEBUG getToken: no valid token and not interactive, returning null');
     return null;
   }
+  console.log('DEBUG getToken: starting interactive auth');
   try {
     const res = await startAuthFlow();
     return res.access_token;

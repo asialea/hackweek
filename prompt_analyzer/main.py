@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import Body, HTTPException, Query, Depends
+from fastapi import Body, HTTPException, Query, Depends, Request
 from typing import List, Dict, Any
 import re
 import os
@@ -141,7 +141,9 @@ def analyze(messages: List[Dict[str, Any]] = Body(...), current_user: Dict[str, 
 
     # If this analysis detects high danger, attempt to notify the user's email address (POC behavior)
     try:
+        print("risk detected:", result.get('danger_level'))
         if str(result.get('danger_level')).lower() == 'high':
+            print("snding email to:", used_user_id)
             # basic email address heuristic
             if isinstance(used_user_id, str) and '@' in used_user_id and '.' in used_user_id.split('@')[-1]:
                 sendgrid_key = os.environ.get('SENDGRID_API_KEY')
@@ -172,12 +174,15 @@ def analyze(messages: List[Dict[str, Any]] = Body(...), current_user: Dict[str, 
                         response['alert_email_sent'] = True
                         response['alert_email_status'] = getattr(sg_resp, 'status_code', None)
                     except Exception as e:
+                        print(f"DEBUG: Error sending alert email: {e}")
                         response['alert_email_sent'] = False
                         response['alert_email_error'] = str(e)
                 else:
+                    print(f"DEBUG: Missing SENDGRID_API_KEY or SENDGRID_FROM")
                     response['alert_email_sent'] = False
                     response['alert_email_error'] = 'Missing SENDGRID_API_KEY or SENDGRID_FROM'
             else:
+                print(f"DEBUG: used_user_id is not a valid email: {used_user_id}")
                 response['alert_email_sent'] = False
                 response['alert_email_error'] = 'used_user_id is not an email'
     except Exception as e:
@@ -189,7 +194,7 @@ def analyze(messages: List[Dict[str, Any]] = Body(...), current_user: Dict[str, 
 
 
 @app.post('/auth/exchange')
-def auth_exchange(code: str = Body(...), code_verifier: str = Body(...), redirect_uri: str = Body(...)):
+async def auth_exchange(request: Request):
     """Exchange an OAuth2 authorization code (PKCE) with the provider and return a local JWT.
 
     Expects environment variables:
@@ -197,12 +202,46 @@ def auth_exchange(code: str = Body(...), code_verifier: str = Body(...), redirec
     Optional:
       OAUTH_PROVIDER_TOKEN_URL (default Google), OAUTH_USERINFO_URL (default Google)
     """
+    # Log the raw request for debugging
+    try:
+        body = await request.body()
+        print(f"DEBUG: Raw request body: {body}")
+        
+        json_body = await request.json()
+        print(f"DEBUG: Parsed JSON body: {json_body}")
+        print(f"DEBUG: JSON body keys: {list(json_body.keys()) if isinstance(json_body, dict) else 'not a dict'}")
+        
+        code = json_body.get('code')
+        code_verifier = json_body.get('code_verifier') 
+        redirect_uri = json_body.get('redirect_uri')
+        
+        print(f"DEBUG: code={code}, code_verifier={code_verifier}, redirect_uri={redirect_uri}")
+        
+        if not code:
+            print("DEBUG: Missing 'code' field")
+        if not code_verifier:
+            print("DEBUG: Missing 'code_verifier' field")
+        if not redirect_uri:
+            print("DEBUG: Missing 'redirect_uri' field")
+        
+        if not code or not code_verifier or not redirect_uri:
+            raise HTTPException(status_code=400, detail='Missing required fields: code, code_verifier, redirect_uri')
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"DEBUG: Error parsing request: {e}")
+        raise HTTPException(status_code=400, detail=f'Invalid request body: {e}')
+    
     token_url = os.environ.get('OAUTH_PROVIDER_TOKEN_URL', 'https://oauth2.googleapis.com/token')
     userinfo_url = os.environ.get('OAUTH_USERINFO_URL', 'https://openidconnect.googleapis.com/v1/userinfo')
     client_id = os.environ.get('OAUTH_CLIENT_ID')
     client_secret = os.environ.get('OAUTH_CLIENT_SECRET')
+    
+    print(f"DEBUG: client_id exists: {bool(client_id)}, client_secret exists: {bool(client_secret)}")
 
     if not client_id or not client_secret:
+        print("ERROR: Missing OAUTH_CLIENT_ID or OAUTH_CLIENT_SECRET")
         raise HTTPException(status_code=400, detail='OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET must be set on the server')
 
     # Exchange code for provider tokens

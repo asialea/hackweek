@@ -19,15 +19,20 @@ def create_jwt(sub: str, expires_minutes: int = 60):
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
+    print(f"DEBUG: Received token: {token[:50]}...") # DEBUG
     try:
         payload = jwt.decode(token, SECRET, algorithms=[ALGORITHM])
         user_id = payload.get('sub')
+        print(f"DEBUG: Token decoded successfully, user_id: {user_id}") # DEBUG
         if not user_id:
+            print("DEBUG: No user_id in token payload") # DEBUG
             raise HTTPException(status_code=401, detail='Invalid token payload')
         return {'user_id': user_id}
     except jwt.ExpiredSignatureError:
+        print("DEBUG: Token expired") # DEBUG
         raise HTTPException(status_code=401, detail='Token expired')
-    except jwt.InvalidTokenError:
+    except jwt.InvalidTokenError as e:
+        print(f"DEBUG: Invalid token error: {e}") # DEBUG
         raise HTTPException(status_code=401, detail='Invalid token')
 
 

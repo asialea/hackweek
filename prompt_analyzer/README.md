@@ -12,29 +12,36 @@ uvicorn main:app --reload
 Notes
 - Default host: http://127.0.0.1:8000
 - Database: `themes.db` in the project root (auto-created)
-- This repository currently runs as a POC: `/analyze` accepts `user_id` from the request body and does not require a JWT. This is insecure and intended for testing only.
+- **Authentication required**: `/analyze` now requires a valid JWT in the Authorization header. Use the browser extension to authenticate via OAuth2/PKCE or call `/auth/exchange` to get a local JWT.
 
 Environment variables
+- `JWT_SECRET` — Secret key for signing/verifying local JWTs (defaults to `dev-secret-change-me` for development).
+- `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET` — OAuth2 credentials for `/auth/exchange` endpoint.
 - `SENDGRID_API_KEY`, `SENDGRID_FROM`, (optional) `SENDGRID_TO` — required for `POST /email_summary/{user_id}` to send emails.
-- `DEFAULT_USER_ID` — fallback user id when none provided (defaults to `default_user`).
 - `STORE_FULL_TEXT` — set to `1`, `true`, or `yes` to persist full message text (defaults to false).
 
 Endpoints (current)
 
 1) POST /analyze
-- Purpose: Analyze one or more messages, return sentiment, themes, and optionally persist themes and analyses when `user_id` provided in the body.
+- Purpose: Analyze one or more messages, return sentiment, themes, and persist analyses for the authenticated user.
+- **Requires**: `Authorization: Bearer <local_jwt>` header
 - Payload:
   {
-    "messages": [{"sender": "user","text": "..."}, ...],
-    "user_id": "alice"  # optional for POC
+    "messages": [{"sender": "user","text": "..."}, ...]
   }
-- Sample curl:
+- Sample curl (requires valid JWT from `/auth/exchange`):
 
 ```bash
 curl -X POST http://127.0.0.1:8000/analyze \
+  -H "Authorization: Bearer <your_local_jwt>" \
   -H "Content-Type: application/json" \
-  -d '{"messages":[{"sender":"user","text":"I feel sad today"}],"user_id":"alice"}'
+  -d '{"messages":[{"sender":"user","text":"I feel sad today"}]}'
 ```
+
+2) POST /auth/exchange
+- Purpose: Exchange OAuth2 authorization code for a backend-issued local JWT
+- Payload: { "code": "...", "code_verifier": "...", "redirect_uri": "..." }
+- Returns: { "access_token": "<local_jwt>", "expires_in": 86400, "user_email": "..." }
 
 2) GET /analyses/{user_id}
 - Return raw analysis rows for a user (optionally filtered by date query param `?date=YYYY-MM-DD`).
@@ -56,5 +63,6 @@ curl -i -X POST "http://127.0.0.1:8000/email_summary/test%40gmail.com" \
 - There are helper modules for themes storage and LLM upleveling. See code in `app/` for additional endpoints and internal helpers.
 
 Security & next steps
-- This POC accepts `user_id` from the request body and should not be used as-is in production — a malicious client could spoof user IDs.
-- For production: reintroduce JWT-based auth, exchange provider codes on the backend for local JWTs, and validate tokens on every request.
+- **JWT Authentication**: `/analyze` now requires valid JWT authentication. Users must authenticate via the browser extension (OAuth2/PKCE flow) or call `/auth/exchange` to obtain a local JWT.
+- User identity is derived from the JWT subject, preventing spoofing attacks.
+- For production: ensure `JWT_SECRET` is set to a strong secret, consider shorter token lifetimes, and implement token refresh as needed.
