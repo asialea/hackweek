@@ -41,6 +41,50 @@ def _nl_to_plain(s: str) -> str:
     # collapse sequences of 2+ newlines into exactly two
     return re.sub(r"\n{2,}", "\n\n", s).strip()
 
+
+def _extract_risk_sentences(text: str, risk_tags: List[str]) -> str:
+    """Extract only sentences that contain risk keywords based on detected risk tags."""
+    if not text or not risk_tags:
+        return text[:400]  # fallback to original behavior
+    
+    # Import RISK_KEYWORDS from analysis module
+    from app.analysis import RISK_KEYWORDS
+    
+    # Collect all patterns for the detected risk tags
+    risk_patterns = []
+    for tag in risk_tags:
+        if tag in RISK_KEYWORDS:
+            risk_patterns.extend(RISK_KEYWORDS[tag])
+    
+    if not risk_patterns:
+        return text[:400]  # fallback if no patterns found
+    
+    # Split text into sentences (simple approach)
+    sentences = re.split(r'[.!?]+', text)
+    relevant_sentences = []
+    
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        
+        # Check if this sentence contains any risk keywords
+        sentence_lower = sentence.lower()
+        for pattern in risk_patterns:
+            if pattern.lower() in sentence_lower:
+                relevant_sentences.append(sentence)
+                break
+    
+    if relevant_sentences:
+        # Join sentences and limit to reasonable length
+        result = '. '.join(relevant_sentences)
+        if len(result) > 800:  # slightly longer than original 400 to preserve sentence context
+            result = result[:800] + '...'
+        return result
+    else:
+        # If no sentences contain keywords, fallback to original behavior
+        return text[:400]
+
 # Optional OpenAI fallback (if configured)
 try:
     import openai
@@ -143,24 +187,177 @@ def analyze(messages: List[Dict[str, Any]] = Body(...), current_user: Dict[str, 
     try:
         print("risk detected:", result.get('danger_level'))
         if str(result.get('danger_level')).lower() == 'high':
-            print("snding email to:", used_user_id)
+            print("sending email to:", used_user_id)
             # basic email address heuristic
             if isinstance(used_user_id, str) and '@' in used_user_id and '.' in used_user_id.split('@')[-1]:
                 sendgrid_key = os.environ.get('SENDGRID_API_KEY')
                 send_from = os.environ.get('SENDGRID_FROM')
                 if sendgrid_key and send_from:
                     try:
-                        # Compose a short alert email (plain + html)
-                        excerpt = (all_text or '')[:400]
-                        subj = f"Alert: high-risk content detected"
+                        # Get daily summary data for context
+                        today_date = datetime.utcnow().date().isoformat()
+                        try:
+                            daily_analyses = get_analyses_for_user_date(used_user_id, today_date)
+                            
+                            # Build summary metrics
+                            theme_counts = {}
+                            compounds = []
+                            risk_counts = {}
+                            for r in daily_analyses:
+                                for t in r.get("themes", []):
+                                    theme_counts[t] = theme_counts.get(t, 0) + 1
+                                for rt in r.get("risk_tags", []):
+                                    risk_counts[rt] = risk_counts.get(rt, 0) + 1
+                                sent = r.get("sentiment") or {}
+                                c = sent.get("compound") if isinstance(sent, dict) else None
+                                if c is not None:
+                                    try:
+                                        compounds.append(float(c))
+                                    except Exception:
+                                        pass
+                            
+                            daily_summary = {
+                                "themes": theme_counts,
+                                "risk_counts": risk_counts,
+                                "avg_sentiment": {"compound": (sum(compounds) / len(compounds) if compounds else None)},
+                                "count": len(daily_analyses),
+                            }
+                        except Exception as e:
+                            print(f"DEBUG: Error getting daily summary: {e}")
+                            daily_summary = {"themes": {}, "risk_counts": {}, "avg_sentiment": {"compound": None}, "count": 0}
+                        
+                        # Calculate daily summary metrics for use in email
+                        daily_risk_total = sum(daily_summary.get("risk_counts", {}).values())
+                        daily_avg_sentiment = daily_summary.get("avg_sentiment", {}).get("compound")
+                        daily_sentiment_label = "neutral"
+                        if daily_avg_sentiment is not None:
+                            if daily_avg_sentiment >= 0.05:
+                                daily_sentiment_label = "positive"
+                            elif daily_avg_sentiment <= -0.05:
+                                daily_sentiment_label = "negative"
+                        
+                        # Compose a short alert email (plain + html) with only sentences containing risk keywords
+                        excerpt = _extract_risk_sentences(all_text or '', response.get('risk_tags', []))
+                        detected_time = response.get('analysis_ts', datetime.utcnow().isoformat())
+                        subj = f"🚨 SafeChat AI Alert: High-Risk Content Detected - {used_user_id}"
                         plain = (
+                            f"🚨 HIGH-RISK CONTENT DETECTED 🚨\n\n"
                             f"We detected high-risk content in recent analyzed messages.\n\n"
+                            f"ALERT DETAILS:\n"
                             f"Risk tags: {', '.join(response.get('risk_tags', []))}\n"
-                            f"Detected at: {response.get('analysis_ts', datetime.utcnow().isoformat())}\n\n"
-                            f"Excerpt:\n{excerpt}\n\n"
-                            "If this is an emergency, contact local emergency services immediately."
+                            f"Detected at: {detected_time}\n\n"
+                            f"RELEVANT CONTENT:\n{excerpt}\n\n"
+                            f"TODAY'S ACTIVITY SUMMARY:\n"
+                            f"- Total analyses: {daily_summary.get('count', 0)}\n"
+                            f"- Overall sentiment: {daily_sentiment_label.title()}\n"
+                            f"- Total risk events: {daily_risk_total}\n"
+                            f"- Top themes: {', '.join([f'{t}({c})' for t, c in sorted(daily_summary.get('themes', {}).items(), key=lambda x: x[1], reverse=True)[:3]])}\n\n"
+                            "⚠️ If this is an emergency, contact local emergency services immediately."
                         )
-                        html = f"<p><strong>High-risk content detected</strong></p><p>Risk tags: {', '.join(response.get('risk_tags', []))}</p><p>Excerpt:<br><pre>{excerpt}</pre></p><p>If this is an emergency, contact local emergency services immediately.</p>"
+                        
+                        # Create styled HTML similar to summary email but with urgent styling
+                        risk_badges_html = ''.join([f'<span class="risk-badge">{tag}</span>' for tag in response.get('risk_tags', [])])
+                        
+                        # Format daily summary data
+                        daily_themes_html = ''
+                        if daily_summary.get("themes"):
+                            top_themes = sorted(daily_summary["themes"].items(), key=lambda x: x[1], reverse=True)[:5]
+                            daily_themes_html = ''.join([f'<span class="theme-badge">{theme} ({count})</span>' for theme, count in top_themes])
+                        
+                        html = f"""
+                        <html>
+                        <head>
+                            <meta charset="utf-8" />
+                            <style>
+                                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; color: #111; background: #fff8f6; padding: 24px; }}
+                                .card {{ background: #fff; border: 2px solid #fca5a5; border-radius: 12px; padding: 0; max-width: 680px; margin: auto; box-shadow: 0 10px 25px rgba(220,38,38,0.15); overflow: hidden; }}
+                                .alert-header {{ background: linear-gradient(135deg, #dc2626, #b91c1c); color: white; padding: 20px; position: relative; }}
+                                .alert-header::after {{ content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 4px; background: linear-gradient(90deg, rgba(255,255,255,0.3), rgba(255,255,255,0.1)); }}
+                                h1 {{ font-size: 20px; margin: 0; font-weight: 700; text-shadow: 0 1px 2px rgba(0,0,0,0.1); }}
+                                .muted {{ color: #666; font-size: 13px; margin-top: 4px; }}
+                                .content-wrapper {{ padding: 20px; }}
+                                .metrics {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 0 0 24px 0; }}
+                                .metric {{ background: linear-gradient(135deg, #fef2f2, #fff); border: 1px solid #fecaca; padding: 16px; border-radius: 8px; font-size: 13px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }}
+                                .metric strong {{ display: block; color: #374151; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }}
+                                .metric div {{ font-size: 16px; font-weight: 600; }}
+                                .risk-badge {{ display: inline-block; background: linear-gradient(135deg, #dc2626, #b91c1c); color: white; padding: 8px 14px; border-radius: 20px; font-weight: 600; font-size: 12px; margin-right: 8px; margin-bottom: 6px; box-shadow: 0 2px 4px rgba(220,38,38,0.3); }}
+                                .theme-badge {{ display: inline-block; background: linear-gradient(135deg, #f8fafc, #f1f5f9); color: #475569; border: 1px solid #e2e8f0; padding: 6px 12px; border-radius: 16px; font-weight: 500; font-size: 11px; margin-right: 6px; margin-bottom: 6px; }}
+                                .section-header {{ font-size: 16px; font-weight: 600; margin: 24px 0 12px 0; color: #374151; display: flex; align-items: center; }}
+                                .section-header.danger {{ color: #dc2626; }}
+                                .excerpt {{ background: linear-gradient(135deg, #f9fafb, #ffffff); border: 1px solid #e5e7eb; border-left: 4px solid #dc2626; padding: 18px; margin: 16px 0; border-radius: 8px; font-size: 14px; line-height: 1.6; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }}
+                                .summary-section {{ background: linear-gradient(135deg, #f8fafc, #ffffff); border: 1px solid #e2e8f0; border-radius: 10px; padding: 20px; margin: 24px 0; box-shadow: 0 4px 8px rgba(0,0,0,0.05); }}
+                                .summary-metrics {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 16px; }}
+                                .summary-metric {{ background: linear-gradient(135deg, #ffffff, #f9fafb); border: 1px solid #e5e7eb; padding: 14px 12px; border-radius: 8px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05); transition: transform 0.2s; }}
+                                .summary-metric:hover {{ transform: translateY(-1px); }}
+                                .summary-metric strong {{ display: block; color: #6b7280; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }}
+                                .summary-metric div {{ font-size: 18px; font-weight: 700; }}
+                                .themes-section {{ margin-top: 16px; }}
+                                .themes-title {{ font-size: 13px; font-weight: 600; color: #6b7280; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }}
+                                .emergency {{ background: linear-gradient(135deg, #fee2e2, #fef2f2); border: 2px solid #fecaca; padding: 20px; border-radius: 10px; margin-top: 24px; font-size: 15px; font-weight: 600; text-align: center; box-shadow: 0 4px 8px rgba(220,38,38,0.1); }}
+                                .emergency::before {{ content: '⚠️'; font-size: 24px; display: block; margin-bottom: 8px; }}
+                                .timestamp {{ color: rgba(255,255,255,0.8); font-size: 12px; font-family: 'SF Mono', Monaco, monospace; margin-top: 8px; font-weight: 400; }}
+                                @media (max-width: 600px) {{ 
+                                    .metrics {{ grid-template-columns: 1fr; }}
+                                    .summary-metrics {{ grid-template-columns: 1fr; }}
+                                }}
+                            </style>
+                        </head>
+                        <body>
+                            <div class="card">
+                                <div class="alert-header">
+                                    <h1>🚨 High-Risk Content Detected</h1>
+                                    <div class="timestamp">Detected: {detected_time}</div>
+                                </div>
+
+                                <div class="content-wrapper">
+                                    <div class="metrics">
+                                        <div class="metric">
+                                            <strong>Risk Level</strong>
+                                            <div style="color: #dc2626;">HIGH</div>
+                                        </div>
+                                        <div class="metric">
+                                            <strong>Categories Found</strong>
+                                            <div>{len(response.get('risk_tags', []))}</div>
+                                        </div>
+                                    </div>
+
+                                    <h2 class="section-header danger">🏷️ Risk Categories Detected</h2>
+                                    <div style="margin-bottom: 20px;">
+                                        {risk_badges_html}
+                                    </div>
+
+                                    <h2 class="section-header">📝 Relevant Content</h2>
+                                    <div class="excerpt">
+                                        {excerpt}
+                                    </div>
+
+                                    <div class="summary-section">
+                                        <h2 style="font-size: 16px; margin: 0 0 8px 0; color: #374151; font-weight: 600;">📊 Today's Activity Summary</h2>
+                                        <div class="summary-metrics">
+                                            <div class="summary-metric">
+                                                <strong>Total Analyses</strong>
+                                                <div>{daily_summary.get('count', 0)}</div>
+                                            </div>
+                                            <div class="summary-metric">
+                                                <strong>Overall Sentiment</strong>
+                                                <div style="color: {'#059669' if daily_sentiment_label == 'positive' else '#dc2626' if daily_sentiment_label == 'negative' else '#6b7280'};">{daily_sentiment_label.title()}</div>
+                                            </div>
+                                            <div class="summary-metric">
+                                                <strong>Risk Events</strong>
+                                                <div style="color: {'#dc2626' if daily_risk_total > 0 else '#059669'};">{daily_risk_total}</div>
+                                            </div>
+                                        </div>
+                                        {f'<div class="themes-section"><div class="themes-title">Top Themes Today</div><div>{daily_themes_html}</div></div>' if daily_themes_html else ''}
+                                    </div>
+
+                                    <div class="emergency">
+                                        If this is an emergency, contact local emergency services immediately
+                                    </div>
+                                </div>
+                            </div>
+                        </body>
+                        </html>
+                        """
 
                         msg = Mail(
                             from_email=send_from,
