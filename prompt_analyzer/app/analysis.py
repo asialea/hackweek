@@ -18,36 +18,170 @@ openai_client = OpenAI(
 analyzer = SentimentIntensityAnalyzer()
 
 RISK_KEYWORDS = {
-    "self_harm": ["kill myself", "suicide", "end my life", "hurt myself"],
-    "sexual": ["porn", "sex", "nude", "naked", "explicit"],
-    "violence": ["kill", "attack", "shoot", "stab"],
-    "drugs": ["drug", "cocaine", "heroin", "weed", "marijuana"],
+    "self_harm": [
+        "kill myself",
+        "commit suicide",
+        "suicidal",
+        "end my life",
+        "take my life",
+        "hurt myself",
+        "cut myself",
+        "self harm",
+        "cutting",
+        "overdose",
+        "hang myself",
+        "jump off",
+        "i want to die",
+        "life not worth living"
+    ],
+    "sexual": [
+        "porn",
+        "pornography",
+        "sex",
+        "sexual",
+        "nude",
+        "nudes",
+        "naked",
+        "explicit",
+        "xxx",
+        "onlyfans",
+        "erotic",
+        "fetish",
+        "camgirl",
+        "adult content"
+    ],
+    "violence": [
+        "kill",
+        "murder",
+        "attack",
+        "shoot",
+        "shooting",
+        "stab",
+        "stabbing",
+        "massacre",
+        "bomb",
+        "bombing",
+        "terrorist",
+        "terrorism",
+        "rape",
+        "assault",
+        "torture",
+        "arson"
+    ],
+    "drugs": [
+        "drugs",
+        "illegal drugs", 
+        "cocaine",
+        "heroin",
+        "weed",
+        "marijuana",
+        "cannabis",
+        "methamphetamine",
+        "lsd",
+        "ecstasy",
+        "molly",
+        "opioid",
+        "oxycodone",
+        "fentanyl",
+        "ketamine",
+        "psychedelics"
+    ],
+    "mental_health": [
+        "depression",
+        "depressed",
+        "mental breakdown",
+        "nervous breakdown",
+        "can't cope",
+        "overwhelmed",
+        "hopeless",
+        "helpless"
+    ]
 }
 
 
 def detect_risk_tags(text: str) -> List[str]:
     tags = []
     lowered = text.lower()
+    
+    print(f"DEBUG: Checking text for keyword risks: '{lowered[:200]}...'")
+    
     for tag, patterns in RISK_KEYWORDS.items():
         for p in patterns:
-            if p in lowered:
+            # Use regex word boundaries to match only complete words/phrases
+            pattern = r'\b' + re.escape(p) + r'\b'
+            if re.search(pattern, lowered):
+                print(f"DEBUG: Keyword match found - Tag: {tag}, Pattern: '{p}', Text contains: '{p}'")
                 tags.append(tag)
                 break
     return tags
 
+def detect_risk_themes(themes: List[str]) -> List[str]:
+    """Detect risk categories based on extracted themes using the same RISK_KEYWORDS"""
+    risk_tags = []
+    if not themes:
+        return risk_tags
+    
+    print(f"DEBUG: Checking themes for risk: {themes}")
+    
+    # Convert themes to lowercase for matching
+    themes_lower = [theme.lower() for theme in themes]
+    
+    # Use the same RISK_KEYWORDS for theme detection
+    for tag, keyword_list in RISK_KEYWORDS.items():
+        for keyword in keyword_list:
+            # Use word boundary matching to avoid false positives
+            # Only match if the keyword is a complete word or phrase, not a substring
+            matches = [theme for theme in themes_lower if keyword == theme or (len(keyword.split()) > 1 and keyword in theme)]
+            if matches:
+                print(f"DEBUG: Theme risk match found - Tag: {tag}, Keyword: '{keyword}', Matched themes: {matches}")
+                risk_tags.append(tag)
+                break
+    
+    return risk_tags
+
 # Basic local analysis using VADER and keyword spotting
-def analyze_risk(text: str) -> Dict[str, Any]:
+def analyze_risk(text: str, themes: List[str] = None) -> Dict[str, Any]:
     sent = analyzer.polarity_scores(text)
-    tags = detect_risk_tags(text)
+    keyword_tags = detect_risk_tags(text)
+    theme_tags = detect_risk_themes(themes) if themes else []
+    
+    # DEBUG: Print what triggered the risk detection
+    if keyword_tags:
+        print(f"DEBUG: Keyword tags detected: {keyword_tags}")
+        print(f"DEBUG: Text analyzed: {text[:200]}...")
+    
+    if theme_tags:
+        print(f"DEBUG: Theme tags detected: {theme_tags}")
+        print(f"DEBUG: Themes analyzed: {themes}")
+    
+    # Combine keyword and theme-based risk tags
+    all_tags = list(set(keyword_tags + theme_tags))
+    
     danger = "low"
-    if tags:
+    
+    # Override sentiment for high-risk content
+    if all_tags:
         danger = "high"
+        print(f"DEBUG: HIGH RISK DETECTED! All tags: {all_tags}")
+        print(f"DEBUG: Keyword tags: {keyword_tags}, Theme tags: {theme_tags}")
+        
+        # For self-harm/suicide content, force negative sentiment
+        if "self_harm" in all_tags:
+            sent["compound"] = min(sent["compound"], -0.8)  # Force very negative
+            sent["neg"] = max(sent["neg"], 0.8)
+            sent["pos"] = min(sent["pos"], 0.1)
     elif sent["neg"] > 0.5 or sent["compound"] < -0.6:
         danger = "medium"
     elif sent["compound"] < -0.2:
         danger = "low-medium"
 
-    return {"sentiment": sent, "risk_tags": tags, "danger_level": danger}
+    return {
+        "sentiment": sent, 
+        "risk_tags": all_tags, 
+        "keyword_tags": keyword_tags,
+        "theme_tags": theme_tags,
+        "danger_level": danger
+    }
 
 def summarize_conversation(messages: List[Dict[str, Any]]) -> str:
     joined = " ".join(m.get("text", "") for m in messages[-6:])
@@ -64,7 +198,12 @@ def extract_themes(text: str, top_k: int = 5) -> List[str]:
 
     model = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
     system_prompt = (
-        "You are an ai model trying to categorize text. Give me a comma separated list of major themes of the message in a series of words. Limit it to 5 words."
+        "You are an AI model analyzing text captured from a browser extension that reads different websites. "
+        "Extract only meaningful conversation themes that would be relevant to understanding a person's mental state or daily activities. "
+        "Filter out technical terms, website navigation elements, login prompts, error messages, and other irrelevant web content. "
+        "Focus on themes related to emotions, relationships, activities, interests, and personal topics. "
+        "IMPORTANT: Respond with ONLY a comma-separated list of 1-5 theme words. Do not include any explanations, introductions, or additional text. "
+        "Example format: happy, school, friends, stress, gaming"
     )
 
 
@@ -87,7 +226,13 @@ def extract_themes(text: str, top_k: int = 5) -> List[str]:
                 content = resp["choices"][0]["message"]["content"]
             except Exception:
                 content = str(resp)
-    return content.split(", ") if content else []
+    
+    if not content:
+        return []
+    
+    # Split themes and clean up
+    themes = [theme.strip() for theme in content.split(", ") if theme.strip()]
+    return themes[:top_k]
 
 
 def uplevel_summary_with_llm(aggregated: Dict[str, Any], excerpts: List[str], user_id: str = None) -> str:

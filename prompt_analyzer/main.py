@@ -134,13 +134,17 @@ def analyze(messages: List[Dict[str, Any]] = Body(...), current_user: Dict[str, 
     # Combine all text for sentiment, but keep per-message tags too
     all_text = " \n ".join(m.get("text", "") for m in messages)
 
-    result = analyze_risk(all_text)
+    # Extract themes first so we can use them for risk analysis
+    themes = extract_themes(all_text)
+    result = analyze_risk(all_text, themes)
 
     response = {
         "danger_level": result["danger_level"],
         "risk_tags": list(set(result["risk_tags"])),
+        "keyword_tags": result.get("keyword_tags", []),
+        "theme_tags": result.get("theme_tags", []),
         "sentiment": result["sentiment"],
-        "themes": extract_themes(all_text),
+        "themes": themes,
     }
     # Derive user id from the verified local JWT (subject from token)
     used_user_id = None
@@ -229,8 +233,12 @@ def analyze(messages: List[Dict[str, Any]] = Body(...), current_user: Dict[str, 
                         # Calculate daily summary metrics for use in email
                         daily_risk_total = sum(daily_summary.get("risk_counts", {}).values())
                         daily_avg_sentiment = daily_summary.get("avg_sentiment", {}).get("compound")
+                        
+                        # Override sentiment label if high-risk content detected
                         daily_sentiment_label = "neutral"
-                        if daily_avg_sentiment is not None:
+                        if daily_summary.get("risk_counts", {}).get("self_harm", 0) > 0:
+                            daily_sentiment_label = "negative"  # Force negative for self-harm content
+                        elif daily_avg_sentiment is not None:
                             if daily_avg_sentiment >= 0.05:
                                 daily_sentiment_label = "positive"
                             elif daily_avg_sentiment <= -0.05:
@@ -246,7 +254,6 @@ def analyze(messages: List[Dict[str, Any]] = Body(...), current_user: Dict[str, 
                             f"ALERT DETAILS:\n"
                             f"Risk tags: {', '.join(response.get('risk_tags', []))}\n"
                             f"Detected at: {detected_time}\n\n"
-                            f"RELEVANT CONTENT:\n{excerpt}\n\n"
                             f"TODAY'S ACTIVITY SUMMARY:\n"
                             f"- Total analyses: {daily_summary.get('count', 0)}\n"
                             f"- Overall sentiment: {daily_sentiment_label.title()}\n"
@@ -324,11 +331,6 @@ def analyze(messages: List[Dict[str, Any]] = Body(...), current_user: Dict[str, 
                                     <h2 class="section-header danger">🏷️ Risk Categories Detected</h2>
                                     <div style="margin-bottom: 20px;">
                                         {risk_badges_html}
-                                    </div>
-
-                                    <h2 class="section-header">📝 Relevant Content</h2>
-                                    <div class="excerpt">
-                                        {excerpt}
                                     </div>
 
                                     <div class="summary-section">
@@ -567,11 +569,11 @@ def mental_health_assessment(user_id: str, date: str = Query(None, description="
 
 
 @app.post("/email_summary/{user_id}")
-def email_summary(user_id: str, recipient: str = Body(None, embed=True), date: str = Body(None, embed=True)):
+def email_summary(user_id: str, date: str = Body(None, embed=True)):
     """Compose the mental health assessment and email it using SendGrid.
 
-    Requires SENDGRID_API_KEY and SENDGRID_FROM environment variables. If recipient is not provided,
-    SENDGRID_TO env var will be used.
+    Requires SENDGRID_API_KEY and SENDGRID_FROM environment variables. 
+    The user_id is used as the email recipient.
     """
     # build the assessment
     try:
@@ -583,10 +585,10 @@ def email_summary(user_id: str, recipient: str = Body(None, embed=True), date: s
 
     sendgrid_key = os.environ.get("SENDGRID_API_KEY")
     send_from = os.environ.get("SENDGRID_FROM")
-    send_to = recipient or os.environ.get("SENDGRID_TO")
+    send_to = user_id  # Use user_id directly as email recipient
 
     if not sendgrid_key or not send_from or not send_to:
-            raise HTTPException(status_code=400, detail="SENDGRID_API_KEY, SENDGRID_FROM and SENDGRID_TO/recipient must be set")
+            raise HTTPException(status_code=400, detail="SENDGRID_API_KEY and SENDGRID_FROM must be set")
 
     subject = f"Daily summary for {user_id}"
     agg = mh["aggregated"]

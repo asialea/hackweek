@@ -50,13 +50,13 @@ curl -X POST http://127.0.0.1:8000/analyze \
 - Aggregate analyses for the user and ask the optional LLM helper to generate a human-friendly assessment. Requires LLM API key to uplevel.
 
 4) POST /email_summary/{user_id}
-- Compose an HTML + plaintext summary for the user's aggregated metrics and send via SendGrid. Body params: `recipient` (email) and optional `date` (YYYY-MM-DD). Requires SendGrid env vars.
-- Sample curl (send today's summary to the same email):
+- Compose an HTML + plaintext summary for the user's aggregated metrics and send via SendGrid. The user_id is used as the email recipient. Body params: optional `date` (YYYY-MM-DD). Requires SendGrid env vars.
+- Sample curl (send today's summary):
 
 ```bash
-curl -i -X POST "http://127.0.0.1:8000/email_summary/test%40gmail.com" \
+curl -i -X POST "http://127.0.0.1:8000/email_summary/test@gmail.com" \
   -H "Content-Type: application/json" \
-  -d '{"recipient":"sample@gmail.com","date":"2025-09-19"}'
+  -d '{"date":"2025-09-29"}'
 ```
 
 5) Other utilities

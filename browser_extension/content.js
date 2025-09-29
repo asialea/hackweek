@@ -30,6 +30,14 @@
         if (area === 'local' && changes.analyzeEndpoint) {
           cachedEndpoint = changes.analyzeEndpoint.newValue || cachedEndpoint;
         }
+        // If auth token changes (after login), capture current page content
+        if (area === 'local' && (changes.access_token || changes.user_email)) {
+          console.log('Auth state changed, capturing page content...');
+          setTimeout(() => {
+            lastCapturedHash = null; // Reset to force capture
+            captureNow();
+          }, 500);
+        }
       });
     }
   } catch (e) {}
@@ -73,13 +81,72 @@
         if (!txt) continue;
         const parent = node.parentElement;
         if (!parent) continue;
+        
+        // Skip if element is hidden
         const style = window.getComputedStyle(parent);
         if (style && (style.visibility === 'hidden' || style.display === 'none' || parseFloat(style.opacity || '1') === 0)) continue;
         if (!elementInViewport(parent)) continue;
+        
+        // Skip common UI/toolbar elements by role, tag, class, or id
+        if (shouldSkipElement(parent)) continue;
+        
         chunks.push(txt);
       }
       return chunks.join(' ');
     } catch (e) { return ''; }
+  }
+
+  function shouldSkipElement(element) {
+    // Skip by ARIA roles
+    const role = element.getAttribute('role');
+    if (role && ['toolbar', 'menubar', 'navigation', 'banner', 'button', 'tab', 'tablist'].includes(role.toLowerCase())) {
+      return true;
+    }
+    
+    // Skip common UI tags
+    const tagName = element.tagName.toLowerCase();
+    if (['nav', 'header', 'footer', 'aside', 'button'].includes(tagName)) {
+      return true;
+    }
+    
+    // Skip by common class names and IDs (case-insensitive)
+    const className = (element.className || '').toLowerCase();
+    const id = (element.id || '').toLowerCase();
+    const uiKeywords = ['toolbar', 'menu', 'nav', 'header', 'footer', 'sidebar', 'breadcrumb', 'pagination', 'ads', 'advertisement'];
+    
+    for (const keyword of uiKeywords) {
+      if (className.includes(keyword) || id.includes(keyword)) {
+        return true;
+      }
+    }
+    
+    // Skip if parent is likely a UI element
+    let current = element.parentElement;
+    let depth = 0;
+    while (current && depth < 3) { // Check up to 3 levels up
+      const parentRole = current.getAttribute('role');
+      const parentTag = current.tagName.toLowerCase();
+      const parentClass = (current.className || '').toLowerCase();
+      
+      if (parentRole && ['toolbar', 'menubar', 'navigation', 'banner'].includes(parentRole.toLowerCase())) {
+        return true;
+      }
+      
+      if (['nav', 'header', 'footer'].includes(parentTag)) {
+        return true;
+      }
+      
+      for (const keyword of ['toolbar', 'menu', 'nav', 'header', 'footer']) {
+        if (parentClass.includes(keyword)) {
+          return true;
+        }
+      }
+      
+      current = current.parentElement;
+      depth++;
+    }
+    
+    return false;
   }
 
   function postCapture(text) {
